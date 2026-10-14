@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import shlex
+import tempfile
 
 from desloppify.base.output.terminal import log
 from desloppify.engine.detectors.base import ComplexitySignal
@@ -51,6 +53,32 @@ def _run_cppcheck_batch(scan_root: Path, files: list[str]):
     )
 
 
+def _is_unused_function(entry: dict) -> bool:
+    fields = entry["message"].split(": ", 2)
+    return len(fields) == 3 and fields[1] == "unusedFunction"
+
+
+def _run_cppcheck_whole_program(scan_root: Path, files: list[str]):
+    # A compilation database keeps each file's dialect, including C++ headers,
+    # while collecting calls across every batch and per-file retry.
+    try:
+        with tempfile.TemporaryDirectory(prefix="desloppify-cppcheck-") as temporary:
+            database = Path(temporary) / "compile_commands.json"
+            database.write_text(json.dumps([
+                {"directory": str(scan_root.resolve()), "file": str((scan_root / file).resolve()),
+                 "arguments": ["cc", "-x", "c" if Path(file).suffix.lower() == ".c" else "c++",
+                               "-c", str((scan_root / file).resolve())]}
+                for file in files
+            ]), encoding="utf-8")
+            return run_tool_result(
+                "cppcheck --template='{file}:{line}: {severity}: {id}: {message}' "
+                f"--enable=unusedFunction,information --quiet --project={shlex.quote(str(database))}",
+                scan_root, PARSERS["gnu"],
+            )
+    except OSError as error:
+        return ToolRunResult(entries=[], status="error", error_kind="tool_io_error", message=str(error))
+
+
 def phase_cppcheck_issue(
     path: Path,
     lang: LangRuntimeContract,
@@ -87,6 +115,25 @@ def phase_cppcheck_issue(
             entries.extend(single_result.entries)
         if not recovered and failure_result is None:
             failure_result = batch_result
+
+    if any(_is_unused_function(entry) for entry in entries):
+        # Batch-local unused claims are unproven. Only a complete-project pass
+        # can establish that no other translation unit calls the function.
+        entries = [entry for entry in entries if not _is_unused_function(entry)]
+        whole = _run_cppcheck_whole_program(path, files)
+        configuration_ids = {"missingInclude", "missingIncludeSystem", "syntaxError", "unknownMacro", "preprocessorErrorDirective"}
+        incomplete = any(
+            len(fields := entry["message"].split(": ", 2)) == 3 and fields[1] in configuration_ids
+            for entry in whole.entries
+        )
+        if whole.status == "error" or incomplete:
+            if failure_result is None:
+                failure_result = whole if whole.status == "error" else ToolRunResult(
+                    entries=[], status="error", error_kind="tool_configuration",
+                    message="Whole-program unused-function analysis has configuration/parser notices",
+                )
+        else:
+            entries.extend(entry for entry in whole.entries if _is_unused_function(entry))
 
     if failure_result is not None:
         _record_tool_failure_coverage(

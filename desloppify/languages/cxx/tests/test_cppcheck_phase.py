@@ -183,3 +183,79 @@ def test_cppcheck_analysis_notices_reduce_coverage_without_creating_code_defects
     assert signals == {"cppcheck_issue": 2}
     assert lang.detector_coverage["cppcheck_issue"]["reason"] == "tool_configuration"
     assert len(lang.coverage_warnings) == 1
+
+
+def test_unused_functions_are_reconciled_across_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr(cxx_phases, "find_cxx_files", lambda _: ["src/producer.cpp", "src/consumer.cpp"])
+    monkeypatch.setattr(cxx_phases, "_CPPCHECK_BATCH_SIZE", 1)
+    stale = {"file": "src/producer.cpp", "line": 1,
+             "message": "style: unusedFunction: The function 'shared_value' is never used."}
+    dead = {"file": "src/producer.cpp", "line": 2,
+            "message": "style: unusedFunction: The function 'dead_value' is never used."}
+    other = {"file": "src/consumer.cpp", "line": 4,
+             "message": "warning: uninitvar: Uninitialized variable: value"}
+    monkeypatch.setattr(cxx_phases, "_run_cppcheck_batch", lambda _, files: ToolRunResult(
+        entries=[stale] if "producer.cpp" in files[0] else [other], status="ok"))
+    calls = []
+    def whole(root, files):
+        calls.append((root, files))
+        return ToolRunResult(entries=[dead], status="ok")
+    monkeypatch.setattr(cxx_phases, "_run_cppcheck_whole_program", whole)
+    issues, _ = cxx_phases.phase_cppcheck_issue(tmp_path, SimpleNamespace(detector_coverage={}, coverage_warnings=[]))
+    assert calls == [(tmp_path, ["src/producer.cpp", "src/consumer.cpp"])]
+    assert {issue["summary"] for issue in issues} == {dead["message"], other["message"]}
+
+
+def test_failed_whole_program_pass_does_not_restore_batch_unused_claims(tmp_path, monkeypatch):
+    monkeypatch.setattr(cxx_phases, "find_cxx_files", lambda _: ["src/producer.cpp"])
+    stale = {"file": "src/producer.cpp", "line": 1,
+             "message": "style: unusedFunction: The function 'shared_value' is never used."}
+    monkeypatch.setattr(cxx_phases, "_run_cppcheck_batch", lambda *_: ToolRunResult(entries=[stale], status="ok"))
+    monkeypatch.setattr(cxx_phases, "_run_cppcheck_whole_program", lambda *_: ToolRunResult(
+        entries=[stale], status="error", error_kind="tool_timeout", message="timeout"))
+    lang = SimpleNamespace(detector_coverage={}, coverage_warnings=[])
+    assert cxx_phases.phase_cppcheck_issue(tmp_path, lang) == ([], {})
+    assert lang.detector_coverage["cppcheck_issue"]["reason"] == "tool_timeout"
+
+
+def test_incomplete_whole_program_pass_records_configuration_coverage(tmp_path, monkeypatch):
+    monkeypatch.setattr(cxx_phases, "find_cxx_files", lambda _: ["src/producer.cpp"])
+    stale = {"file": "src/producer.cpp", "line": 1,
+             "message": "style: unusedFunction: The function 'shared_value' is never used."}
+    notice = {"file": "src/consumer.cpp", "line": 1,
+              "message": "error: unknownMacro: Configuration is required."}
+    monkeypatch.setattr(cxx_phases, "_run_cppcheck_batch", lambda *_: ToolRunResult(entries=[stale], status="ok"))
+    monkeypatch.setattr(cxx_phases, "_run_cppcheck_whole_program", lambda *_: ToolRunResult(entries=[stale, notice], status="ok"))
+    lang = SimpleNamespace(detector_coverage={}, coverage_warnings=[])
+    assert cxx_phases.phase_cppcheck_issue(tmp_path, lang) == ([], {})
+    assert lang.detector_coverage["cppcheck_issue"]["reason"] == "tool_configuration"
+
+
+def test_whole_program_database_preserves_paths_and_dialects(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+    files = ["dir with spaces/legacy.c", "src/app.cpp", "src/api.h"]
+    database_path = []
+    def run(command, root, parser):
+        import shlex
+        argument = next(arg for arg in shlex.split(command) if arg.startswith("--project="))
+        database = Path(argument.removeprefix("--project="))
+        database_path.append(database)
+        rows = json.loads(database.read_text())
+        assert [row["file"] for row in rows] == [str((tmp_path / file).resolve()) for file in files]
+        assert [row["arguments"][2] for row in rows] == ["c", "c++", "c++"]
+        assert all(row["directory"] == str(tmp_path.resolve()) for row in rows)
+        return ToolRunResult(entries=[], status="empty")
+    monkeypatch.setattr(cxx_phases, "run_tool_result", run)
+    cxx_phases._run_cppcheck_whole_program(tmp_path, files)
+    assert not database_path[0].exists()
+
+
+def test_whole_program_database_io_error_is_reduced_coverage(tmp_path, monkeypatch):
+    def unavailable(**_kwargs):
+        raise OSError("temporary storage unavailable")
+    monkeypatch.setattr(cxx_phases.tempfile, "TemporaryDirectory", unavailable)
+    result = cxx_phases._run_cppcheck_whole_program(tmp_path, ["src/app.cpp"])
+    assert result.status == "error"
+    assert result.error_kind == "tool_io_error"
+    assert "temporary storage unavailable" in result.message

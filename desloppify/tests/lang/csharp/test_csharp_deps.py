@@ -83,6 +83,95 @@ def test_build_dep_graph_simple_app():
     assert graph[greeter]["importer_count"] >= 1
 
 
+@pytest.mark.parametrize("namespace_style", ["file", "block"])
+def test_build_dep_graph_resolves_same_namespace_type_references(tmp_path, namespace_style):
+    def source(body):
+        if namespace_style == "file":
+            return f"namespace Demo.App;\n{body}\n"
+        return f"namespace Demo.App {{\n{body}\n}}\n"
+
+    program = tmp_path / "Program.cs"
+    helper = tmp_path / "Rendering.cs"
+    unused = tmp_path / "Unused.cs"
+    program.write_text(source("class Program { Renderer renderer = new(); }"))
+    helper.write_text(source("class Renderer {}"))
+    unused.write_text(source("class Unused {}"))
+
+    graph = build_dep_graph(tmp_path)
+
+    assert str(helper) in graph[str(program)]["imports"]
+    assert graph[str(helper)]["importers"] == {str(program)}
+    assert graph[str(unused)]["importer_count"] == 0
+    assert str(program) not in graph[str(helper)]["imports"]
+
+
+def test_build_dep_graph_same_namespace_ignores_comments_and_literals(tmp_path):
+    program = tmp_path / "Program.cs"
+    program.write_text('''namespace Demo.App;
+class Program {
+    // Unused CommentType
+    /* BlockType */
+    string text = "StringType";
+    string verbatim = @"VerbatimType ""Unused""";
+    string raw = """RawType "Unused""";
+}
+''')
+    for name in ["Unused", "CommentType", "BlockType", "StringType", "VerbatimType", "RawType"]:
+        (tmp_path / f"{name}.cs").write_text(f"namespace Demo.App;\nclass {name} {{}}")
+
+    graph = build_dep_graph(tmp_path)
+
+    assert graph[str(program)]["imports"] == set()
+
+
+def test_build_dep_graph_same_namespace_respects_project_references(tmp_path):
+    paths = {}
+    for name in ["App", "Referenced", "Unreferenced"]:
+        directory = tmp_path / name
+        directory.mkdir()
+        paths[name] = directory
+        references = '<ItemGroup><ProjectReference Include="../Referenced/Referenced.csproj" /></ItemGroup>' if name == "App" else ""
+        (directory / f"{name}.csproj").write_text(f'<Project Sdk="Microsoft.NET.Sdk">{references}</Project>')
+    program = paths["App"] / "Program.cs"
+    program.write_text("namespace Shared;\nclass Program { Helper helper; Unavailable unavailable; }")
+    helper = paths["Referenced"] / "Helper.cs"
+    helper.write_text("namespace Shared;\nclass Helper {}")
+    unavailable = paths["Unreferenced"] / "Unavailable.cs"
+    unavailable.write_text("namespace Shared;\nclass Unavailable {}")
+
+    graph = build_dep_graph(tmp_path)
+
+    assert str(helper) in graph[str(program)]["imports"]
+    assert str(unavailable) not in graph[str(program)]["imports"]
+
+
+@pytest.mark.parametrize("directive", ["using static Demo.App.Palette;", "using Colors = Demo.App.Palette;"])
+def test_build_dep_graph_type_using_does_not_import_entire_namespace(tmp_path, directive):
+    program = tmp_path / "Program.cs"
+    palette = tmp_path / "Palette.cs"
+    unused = tmp_path / "Unused.cs"
+    program.write_text(f"{directive}\nnamespace Demo.Client;\nclass Program {{}}")
+    palette.write_text("namespace Demo.App;\nstatic class Palette {}")
+    unused.write_text("namespace Demo.App;\nclass Unused {}")
+
+    graph = build_dep_graph(tmp_path)
+
+    assert graph[str(program)]["imports"] == {str(palette)}
+    assert graph[str(unused)]["importer_count"] == 0
+
+
+@pytest.mark.parametrize("declaration", ["class", "struct", "interface", "enum", "record", "record class", "record struct"])
+def test_build_dep_graph_same_namespace_supports_type_declarations(tmp_path, declaration):
+    program = tmp_path / "Program.cs"
+    helper = tmp_path / "Helpers.cs"
+    program.write_text("namespace Demo;\nclass Program { Helper helper; }")
+    helper.write_text(f"namespace Demo;\n{declaration} Helper {{}}")
+
+    graph = build_dep_graph(tmp_path)
+
+    assert str(helper) in graph[str(program)]["imports"]
+
+
 def test_build_dep_graph_project_reference():
     root = _fixture_root("multi_project")
     graph = build_dep_graph(root)

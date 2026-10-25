@@ -16,6 +16,7 @@ from desloppify.engine.detectors.graph import finalize_graph
 from desloppify.languages.csharp.detectors.deps_support_metadata import (
     expand_namespace_matches as _expand_namespace_matches,
     parse_file_metadata as _parse_file_metadata,
+    parse_file_type_identifiers as _parse_file_type_identifiers,
 )
 from desloppify.languages.csharp.detectors.deps_support_projects import (
     find_csproj_files as _find_csproj_files,
@@ -199,12 +200,18 @@ def build_dep_graph(path: Path, roslyn_cmd: str | None = None) -> dict[str, dict
     namespace_to_files: dict[str, set[str]] = defaultdict(set)
     file_to_namespace: dict[str, str | None] = {}
     file_to_usings: dict[str, set[str]] = {}
+    namespace_types: dict[tuple[str | None, str], set[str]] = defaultdict(set)
+    file_to_identifiers: dict[str, set[str]] = {}
     entrypoint_files: set[str] = set()
     for filepath in cs_files:
         source = resolve_path(filepath)
         namespace, usings, is_entrypoint = _parse_file_metadata(filepath)
+        declared_types, identifiers = _parse_file_type_identifiers(filepath)
         file_to_namespace[source] = namespace
         file_to_usings[source] = usings
+        file_to_identifiers[source] = identifiers
+        for type_name in declared_types:
+            namespace_types[namespace, type_name].add(source)
         graph[source]
         if namespace:
             namespace_to_files[namespace].add(source)
@@ -227,6 +234,7 @@ def build_dep_graph(path: Path, roslyn_cmd: str | None = None) -> dict[str, dict
 
     for source, usings in file_to_usings.items():
         proj = file_to_project.get(source)
+        allowed_projects: set[Path] | None = None
         allowed_namespaces: set[str] | None = None
         if proj is not None:
             allowed_projects = {proj} | project_refs.get(proj, set())
@@ -234,9 +242,36 @@ def build_dep_graph(path: Path, roslyn_cmd: str | None = None) -> dict[str, dict
             for ap in allowed_projects:
                 allowed_namespaces.update(project_to_namespaces.get(ap, set()))
 
-        for using_ns in usings:
-            for target in _expand_namespace_matches(using_ns, namespace_to_files):
+        # C# types in the current namespace need no using directive. Match
+        # declared type names against code identifiers so unused siblings stay
+        # unreferenced and unrelated projects sharing a namespace stay isolated.
+        namespace = file_to_namespace[source]
+        for identifier in file_to_identifiers[source]:
+            for target in namespace_types.get((namespace, identifier), set()):
                 if target == source:
+                    continue
+                if (
+                    allowed_projects is not None
+                    and file_to_project.get(target) not in allowed_projects
+                ):
+                    continue
+                graph[source]["imports"].add(target)
+                graph[target]["importers"].add(source)
+
+        for using_ns in usings:
+            # Static imports and type aliases name a type rather than an entire
+            # namespace. Prefer that declaration over the broad namespace match.
+            type_namespace, _, type_name = using_ns.rpartition(".")
+            type_targets = namespace_types.get((type_namespace or None, type_name))
+            targets = type_targets or _expand_namespace_matches(using_ns, namespace_to_files)
+            for target in targets:
+                if target == source:
+                    continue
+                if (
+                    type_targets
+                    and allowed_projects is not None
+                    and file_to_project.get(target) not in allowed_projects
+                ):
                     continue
                 target_ns = file_to_namespace.get(target)
                 if (

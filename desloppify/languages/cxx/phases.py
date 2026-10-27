@@ -17,7 +17,6 @@ from desloppify.languages._framework.base.types import LangRuntimeContract
 from desloppify.languages._framework.generic_parts.parsers import PARSERS
 from desloppify.languages._framework.generic_parts.tool_factories import _record_tool_failure_coverage
 from desloppify.languages._framework.generic_parts.tool_runner import run_tool_result
-from desloppify.languages.cxx.cppcheck_diagnostics import configuration_checked_result
 from desloppify.languages.cxx._helpers import build_cxx_dep_graph
 from desloppify.languages.cxx.extractors import find_cxx_files
 from desloppify.state_io import Issue
@@ -45,12 +44,10 @@ def _cppcheck_file_args(files: list[str]) -> str:
 
 
 def _run_cppcheck_batch(scan_root: Path, files: list[str]):
-    return configuration_checked_result(
-        run_tool_result(
-            f"{_CPPCHECK_CMD_PREFIX} {_cppcheck_file_args(files)}",
-            scan_root,
-            PARSERS["gnu"],
-        )
+    return run_tool_result(
+        f"{_CPPCHECK_CMD_PREFIX} {_cppcheck_file_args(files)}",
+        scan_root,
+        PARSERS["gnu"],
     )
 
 

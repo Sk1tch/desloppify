@@ -14,7 +14,7 @@ def configuration_checked_result(result: ToolRunResult) -> ToolRunResult:
     """Fail the invocation when cppcheck could not understand its translation units.
 
     Cppcheck can exit zero while reporting missing headers or unsupported macros.
-    The existing batch runners retry individual files and preserve regex security
+    The security runner retries individual files and preserves regex security
     fallback; returning an error here activates that coverage accounting.
     """
     if result.status == "error":

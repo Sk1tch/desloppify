@@ -248,7 +248,7 @@ def _normalize_kind(check_id: str, message: str) -> str | None:
     ):
         return "command_injection"
 
-    if any(api in text for api in _UNSAFE_C_STRING_APIS):
+    if re.search(r"\b(?:" + "|".join(_UNSAFE_C_STRING_APIS) + r")\b", text):
         return "unsafe_c_string"
     if "unsafebufferhandling" in check:
         return "unsafe_c_string"

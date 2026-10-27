@@ -611,3 +611,22 @@ def test_detect_cxx_security_ignores_findings_outside_scoped_files(
 
     assert len(result.entries) == 1
     assert result.entries[0]["file"] == str(source.resolve())
+
+
+def test_missing_widget_include_is_not_an_unsafe_gets_call(tmp_path):
+    entry = {
+        "file": str(tmp_path / "controller.cpp"),
+        "line": 11,
+        "severity": "information",
+        "check_id": "missingInclude",
+        "message": 'Include file: "Widgets/Input/SVirtualJoystick.h" not found.',
+        "source": "cppcheck",
+    }
+    assert security_mod._normalize_tool_entry(entry) is None
+
+
+def test_unsafe_string_api_names_require_identifier_boundaries():
+    for api in security_mod._UNSAFE_C_STRING_APIS:
+        assert security_mod._normalize_kind("", f"Calling '{api}()' is unsafe") == "unsafe_c_string"
+        assert security_mod._normalize_kind(f"clang-analyzer-security.insecureAPI.{api}", "") == "unsafe_c_string"
+        assert security_mod._normalize_kind("", f"Include file: my_{api}_wrapper.h not found") is None

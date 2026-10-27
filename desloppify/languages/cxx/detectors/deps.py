@@ -190,6 +190,7 @@ def _build_from_compile_commands(
     if not isinstance(payload, list):
         return finalize_graph(graph)
 
+    visited_by_context: dict[tuple[Path, ...], set[str]] = {}
     for entry in payload:
         if not isinstance(entry, dict):
             continue
@@ -204,7 +205,8 @@ def _build_from_compile_commands(
         )
         include_dirs = _extract_include_dirs(_parse_command_tokens(entry), directory)
         pending = [source]
-        visited: set[str] = set()
+        # Many translation units share include flags; process shared headers once per context.
+        visited = visited_by_context.setdefault(tuple(include_dirs), set())
         while pending:
             current = pending.pop()
             if current in visited:
